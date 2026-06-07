@@ -556,9 +556,8 @@ class App:
         n_run = len(self.running_sessions)
         n_think = sum(1 for pid in self.running_sessions.values()
                       if self.pane_states.get(pid) == "thinking")
-        run_s = f"─{n_run} running" if n_run else ""
-        think_s = f"─{n_think}⟳" if n_think else ""
-        self._hline(0, w, f" {len(self.projects)} projects─{n_sess} sessions{run_s}{think_s} ", C_OK)
+        open_s = f"─{n_run} open" if n_run else ""
+        self._hline(0, w, f" {len(self.projects)} projects─{n_sess} sessions{open_s} ", C_OK)
 
         # list
         ch = self._content_h()
@@ -814,12 +813,7 @@ class App:
         if not clicked:
             return
 
-        if idx == self.sel or (bstate & curses.BUTTON1_DOUBLE_CLICKED):
-            # second click on same row, or explicit double-click → open and jump focus
-            self._goto(idx)
-            self.status = self._do_open(jump=True)
-        else:
-            self._goto(idx)
+        self._goto(idx)
 
     # ── actions ───────────────────────────────────────────────────────────
 

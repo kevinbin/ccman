@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/hongbin/workbench/ccman/ccman.py'\\).read\\(\\)\\); print\\('AST OK'\\)\")",
+      "Bash(python3 -c \"import ccman; print\\('OK'\\)\")"
+    ]
+  }
+}

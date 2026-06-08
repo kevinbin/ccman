@@ -5,7 +5,10 @@ A terminal TUI for managing Claude Code sessions and projects.
 ## Features
 
 - Lists all Claude Code projects with their sessions underneath
-- Shows running sessions (● indicator) and lets you jump to or kill their tmux panes
+- Shows running sessions (● waiting, ⟳ thinking) and lets you jump to or kill their tmux panes
+- Detects running panes on startup — state survives ccman restarts
+- Batch open: mark multiple sessions with Space, then open all at once
+- Live search / filter across all sessions and projects
 - Alternating horizontal/vertical splits keep the workspace evenly divided
 - Runs as a narrow left sidebar inside tmux, or standalone
 
@@ -32,22 +35,15 @@ ccman
 ## Visual Layout
 
 ```
-╔══════════════════════════════════════════╗
-║  ccman  [2 projects · 7 sessions]  F:here ║   ← header
-╠══════════════════════════════════════════╣
-║  ~/workbench/myapp                [main] ║   ← project (git branch)
-║  ●  Fix login bug           2 h ago      ║   ← session running in a pane
-║  →  Add OAuth flow          1 d ago      ║   ← last opened by ccman
-║  ✎  Custom title            3 d ago      ║   ← session with custom title
-║     Untitled session        5 d ago      ║
-║                                          ║
-║  ~/workbench/notes                       ║
-║     Meeting notes           1 w ago      ║
-╠══════════════════════════════════════════╣
-║  Fix login bug · 8eaf2b1c-…             ║   ← preview (session ID)
-╠══════════════════════════════════════════╣
-║  /·find  n·new  Enter·open  K·kill  q   ║   ← key bar
-╚══════════════════════════════════════════╝
+──── 2 projects─7 sessions─2 open ────   ← header (live counts)
+ ▼ ~/workbench/myapp [main]  (3)         ← project: expanded, git branch, session count
+ ⟳ Add OAuth flow                        ← running — Claude is thinking  (blue)
+ ● Fix login bug                         ← running — waiting for input   (magenta)
+ ✓ Marked session                        ← marked for batch open         (green)
+   Untitled session
+ ▶ ~/workbench/notes  (1)                ← project: collapsed
+─────────────────────────────────────
+ ?·help  q·quit                          ← key bar (or /query▌  (N) in search)
 ```
 
 ## Key Bindings
@@ -56,45 +52,54 @@ ccman
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` / `↑` / `↓` | Move cursor |
+| `j` / `k` | Move cursor down / up |
 | `g` / `G` | Jump to top / bottom |
-| `Space` / `l` / `→` | Expand project |
-| `h` / `←` | Collapse project / move to parent |
-| `1` – `9` | Jump to nth project |
+| `Space` on project | Expand / collapse |
+| `Space` on session | Mark / unmark for batch open |
+| `Esc` | Clear all marks |
 
 ### Actions
 
 | Key | Action |
 |-----|--------|
-| `Enter` / `o` | Open session (resume with `claude -r`) |
+| `Enter` / `o` | Open session (or switch focus if already running); opens all marked sessions if any are marked |
 | `n` | New session in current project |
-| `N` | New project (prompts for path) |
-| `d` | Delete session (asks y/N) |
-| `K` | Kill tmux pane of running session (asks y/N) |
-| `r` | Reload all projects |
-| `/` | Search sessions and projects |
-| `e` | Rename session (custom title) |
-| `E` | Clear custom title (restore AI-generated title) |
-| `y` | Copy session ID to clipboard |
-| `i` | Show full info popup |
-| `F` | Toggle focus — stay in ccman or jump to new pane |
+| `N` | New project (prompts for path, Tab autocompletes directories) |
+| `d` | Delete selected session; on a missing-path project, delete the project record |
+| `K` | Kill tmux pane of the selected running session |
+| `Q` | Kill all running sessions |
+| `e` | Rename session (set custom title) |
+| `i` | Show full info popup (ID, path, timestamps, turn count) |
+| `?` | In-app help |
 | `q` | Quit |
+
+### Search
+
+| Key | Action |
+|-----|--------|
+| `/` | Enter search mode |
+| type | Filter and highlight matching sessions |
+| `Tab` | Jump to next match |
+| `Shift+Tab` | Jump to previous match |
+| `Enter` | Open selected match and exit search |
+| `Esc` | Exit search, restore full list |
 
 ### Mouse
 
 | Action | Effect |
 |--------|--------|
-| Click once | Select item |
-| Click again / double-click | Open session |
-| Scroll wheel | Navigate list |
+| Click | Select item |
+| Scroll wheel | Navigate list (3 rows per tick) |
 
 ## Indicators
 
 | Symbol | Meaning |
 |--------|---------|
-| `●` | Session is running in a tmux pane — `Enter` switches focus to it |
-| `→` | Last session opened by ccman |
-| `✎` | Session has a custom title |
+| `⟳` | Claude is thinking / running tools (blue) |
+| `●` | Claude is waiting for input (magenta) |
+| `✓` | Session is marked for batch open (green) |
+| `⚠` | Project directory no longer exists on disk — `d` to delete the record |
+| `▼` / `▶` | Project is expanded / collapsed |
 
 ## Tmux Pane Splitting
 
@@ -104,8 +109,6 @@ Each new session opened from ccman creates a new tmux pane. Splits alternate bet
 - 2nd: splits the largest pane vertically
 - 3rd: splits the largest pane horizontally → 2×2 grid
 - And so on…
-
-The `F` key controls whether focus returns to ccman after opening a session (`here`) or jumps to the new pane (`pane`).
 
 ## Session Storage
 

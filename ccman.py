@@ -14,6 +14,8 @@ CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_BIN = "claude --allow-dangerously-skip-permissions"
 CCMAN_CONFIG_DIR = Path.home() / ".config" / "ccman"
 TITLES_FILE = CCMAN_CONFIG_DIR / "titles.json"
+STATE_DIR = CCMAN_CONFIG_DIR / "state"   # hook 写入的会话状态: <session_id> → "busy"|"waiting"
+IDLE_AFTER = 300   # "waiting" 持续超过这么多秒视为 idle（空闲）
 
 # ─── data ─────────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,20 @@ def _git_branch(path: str) -> str | None:
         return branch if r.returncode == 0 and branch else None
     except Exception:
         return None
+
+
+def read_session_states() -> dict:
+    """Return {session_id: (state, mtime)} from hook-written state files."""
+    out: dict[str, tuple[str, float]] = {}
+    try:
+        for f in STATE_DIR.iterdir():
+            try:
+                out[f.name] = (f.read_text().strip(), f.stat().st_mtime)
+            except OSError:
+                pass
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    return out
 
 
 def load_custom_titles() -> dict:
@@ -239,28 +255,6 @@ def get_running_sessions() -> dict[str, str]:
         return {}
 
 
-def _pane_state_update(pane_id: str, last: str, stable: int) -> tuple[str | None, str, int]:
-    """Capture pane content to detect thinking vs waiting.
-
-    Returns (state, snapshot, stable_count) where state is None if pane is gone.
-    'thinking' = content changed since last call; 'waiting' = stable for ≥3 ticks (~600ms).
-    """
-    try:
-        r = subprocess.run(
-            ["tmux", "capture-pane", "-t", pane_id, "-p"],
-            capture_output=True, text=True, timeout=0.3,
-        )
-    except subprocess.TimeoutExpired:
-        return "thinking", last, stable
-    if r.returncode != 0:
-        return None, last, stable
-    content = r.stdout
-    if content != last:
-        return "thinking", content, 0
-    new_stable = stable + 1
-    return ("waiting" if new_stable >= 3 else "thinking"), content, new_stable
-
-
 def _tmux_open(cmd: str, cwd: str | None = None) -> tuple[str | None, str | None]:
     """Split the largest pane along its longer axis, evenly dividing the space.
 
@@ -341,6 +335,7 @@ C_MARK   = 7   # green – "✓" marked-for-open indicator
 C_RUN    = 8   # magenta  – "●" running-in-pane marker
 C_MATCH  = 9   # red      – search match highlight
 C_THINK  = 10  # blue     – "⟳" thinking indicator
+C_WARN   = 11  # yellow   – "‼" awaiting-permission marker
 
 
 class App:
@@ -350,9 +345,7 @@ class App:
         self.all_flat: list = []
         self.flat: list = []
         self.running_sessions: dict[str, str] = {}   # session_id → pane_id
-        self.pane_states: dict[str, str] = {}        # pane_id → "thinking"|"waiting"
-        self._pane_snapshot: dict[str, str] = {}     # pane_id → last captured content
-        self._pane_stable: dict[str, int] = {}       # pane_id → consecutive-stable tick count
+        self.session_states: dict[str, tuple[str, float]] = {}  # session_id → (state, mtime)
         self._pending_panes: dict[str, tuple[str, float]] = {}  # pane_id → (proj_dir_name, created_at)
         self.marked: set[str] = set()                # session IDs marked for batch open
         self.sel: int = 0
@@ -382,6 +375,7 @@ class App:
         curses.init_pair(C_RUN,    curses.COLOR_MAGENTA,  bg)
         curses.init_pair(C_MATCH,  curses.COLOR_YELLOW,   bg)
         curses.init_pair(C_THINK,  curses.COLOR_BLUE,     bg)
+        curses.init_pair(C_WARN,   curses.COLOR_YELLOW,   bg)
 
     def _init_mouse(self):
         try:
@@ -423,11 +417,6 @@ class App:
                 ["tmux", "set-option", "-p", "-t", pane_id, "@ccman_sid", sid],
                 capture_output=True,
             )
-        alive = set(self.running_sessions.values())
-        for pid in [k for k in list(self.pane_states) if k not in alive]:
-            del self.pane_states[pid]
-            self._pane_snapshot.pop(pid, None)
-            self._pane_stable.pop(pid, None)
         self._rebuild_all()
         self._associate_pending_panes()
         self._restore_sel(sel_id)
@@ -469,25 +458,14 @@ class App:
                 del self._pending_panes[pane_id]
 
     def _fast_refresh(self):
-        """200ms fast path: detect pane exit and update thinking/waiting state."""
-        dead = []
-        for sid, pane_id in list(self.running_sessions.items()):
-            state, snap, stable = _pane_state_update(
-                pane_id,
-                self._pane_snapshot.get(pane_id, ""),
-                self._pane_stable.get(pane_id, 0),
-            )
-            if state is None:
-                dead.append(sid)
-            else:
-                self.pane_states[pane_id] = state
-                self._pane_snapshot[pane_id] = snap
-                self._pane_stable[pane_id] = stable
+        """200ms fast path: refresh hook-written states and drop dead panes."""
+        self.session_states = read_session_states()
+        r = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{pane_id}"],
+                           capture_output=True, text=True)
+        alive = set(r.stdout.split())
+        dead = [sid for sid, pid in self.running_sessions.items() if pid not in alive]
         for sid in dead:
-            pane_id = self.running_sessions.pop(sid)
-            self.pane_states.pop(pane_id, None)
-            self._pane_snapshot.pop(pane_id, None)
-            self._pane_stable.pop(pane_id, None)
+            self.running_sessions.pop(sid, None)
         if dead:
             self._rebuild_all()
 
@@ -550,12 +528,11 @@ class App:
     def draw(self):
         h, w = self.scr.getmaxyx()
         self.scr.erase()
+        blink = int(time.time() * 1.5) % 2 == 0   # ~0.67s 脉动相位，用于 waiting/approval
 
         # header — live stats
         n_sess = sum(len(p["sessions"]) for p in self.projects)
         n_run = len(self.running_sessions)
-        n_think = sum(1 for pid in self.running_sessions.values()
-                      if self.pane_states.get(pid) == "thinking")
         open_s = f"─{n_run} open" if n_run else ""
         self._hline(0, w, f" {len(self.projects)} projects─{n_sess} sessions{open_s} ", C_OK)
 
@@ -596,9 +573,16 @@ class App:
                 is_running = sess["id"] in self.running_sessions
                 is_marked  = sess["id"] in self.marked
                 if is_running:
-                    pane_id = self.running_sessions.get(sess["id"], "")
-                    if self.pane_states.get(pane_id) == "thinking":
+                    st, mt = self.session_states.get(sess["id"], ("", 0.0))
+                    pulse = curses.A_BOLD if blink else curses.A_DIM
+                    if st == "busy":
                         prefix, pfx_attr = "⟳ ", curses.color_pair(C_THINK) | curses.A_BOLD
+                    elif st == "approval":
+                        prefix, pfx_attr = "‼ ", curses.color_pair(C_WARN) | pulse
+                    elif st == "waiting" and time.time() - mt > IDLE_AFTER:
+                        prefix, pfx_attr = "○ ", curses.A_DIM
+                    elif st == "waiting":
+                        prefix, pfx_attr = "● ", curses.color_pair(C_RUN) | pulse
                     else:
                         prefix, pfx_attr = "● ", curses.color_pair(C_RUN) | curses.A_BOLD
                 elif is_marked:
@@ -1208,8 +1192,10 @@ class App:
             "  ?            this help",
             "",
             "Indicators",
-            "  ⟳  Claude is thinking / running tools  (blue)",
-            "  ●  Claude is waiting for input          (magenta)",
+            "  ⟳  Claude is responding              (blue)",
+            "  ●  waiting for your input  (blinks)  (magenta)",
+            "  ‼  waiting for permission  (blinks)  (yellow)",
+            "  ○  idle — waiting > 5 min            (dim)",
         ])
 
     def _show_info(self):
@@ -1307,8 +1293,37 @@ Projects are sorted by most recently modified session.
 """
 
 
+def _run_hook():
+    """`ccman hook` — read a Claude Code hook event on stdin, write session state.
+
+    Wired into ~/.claude/settings.json hooks; never run by hand.
+    """
+    import sys
+    try:
+        d = json.load(sys.stdin)
+    except Exception:
+        return
+    sid = d.get("session_id")
+    if not sid:
+        return
+    event = d.get("hook_event_name", "")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    f = STATE_DIR / sid
+    if event == "SessionEnd":
+        f.unlink(missing_ok=True)
+    elif event in ("UserPromptSubmit", "PreToolUse"):
+        f.write_text("busy")
+    elif event == "PermissionRequest" or (event == "Notification" and "permission" in d.get("notification_type", "").lower()):
+        f.write_text("approval")
+    else:   # Stop, SessionStart, non-permission Notifications
+        f.write_text("waiting")
+
+
 def main():
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "hook":
+        _run_hook()
+        return
     if "-h" in sys.argv or "--help" in sys.argv:
         print(_HELP)
         return

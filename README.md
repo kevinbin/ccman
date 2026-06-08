@@ -5,7 +5,7 @@ A terminal TUI for managing Claude Code sessions and projects.
 ## Features
 
 - Lists all Claude Code projects with their sessions underneath
-- Shows running sessions (● waiting, ⟳ thinking) and lets you jump to or kill their tmux panes
+- Live per-session state (⟳ responding · ● waiting · ‼ approval · ○ idle) sourced from Claude Code hooks; sessions that need you blink
 - Detects running panes on startup — state survives ccman restarts
 - Batch open: mark multiple sessions with Space, then open all at once
 - Live search / filter across all sessions and projects
@@ -95,11 +95,16 @@ ccman
 
 | Symbol | Meaning |
 |--------|---------|
-| `⟳` | Claude is thinking / running tools (blue) |
-| `●` | Claude is waiting for input (magenta) |
+| `⟳` | Claude is responding (blue) |
+| `●` | Waiting for your input — blinks (magenta) |
+| `‼` | Waiting for tool-permission approval — blinks (yellow) |
+| `○` | Idle — waiting more than 5 minutes (dim) |
 | `✓` | Session is marked for batch open (green) |
 | `⚠` | Project directory no longer exists on disk — `d` to delete the record |
 | `▼` / `▶` | Project is expanded / collapsed |
+
+State comes from Claude Code hooks (see below), not pane-scraping. Sessions without
+hooks configured still appear — shown as `●` while running.
 
 ## Tmux Pane Splitting
 
@@ -109,6 +114,38 @@ Each new session opened from ccman creates a new tmux pane. Splits alternate bet
 - 2nd: splits the largest pane vertically
 - 3rd: splits the largest pane horizontally → 2×2 grid
 - And so on…
+
+## Accurate Status via Hooks
+
+ccman reads each session's state from files written by Claude Code hooks, instead of
+guessing from terminal output. Wire the hooks once in `~/.claude/settings.json`, pointing
+every event at `ccman hook` (use the absolute path to your `ccman.py`):
+
+```json
+{
+  "hooks": {
+    "SessionStart":     [{"hooks": [{"type": "command", "command": "/path/to/ccman.py hook"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/path/to/ccman.py hook"}]}],
+    "PreToolUse":       [{"hooks": [{"type": "command", "command": "/path/to/ccman.py hook"}]}],
+    "PermissionRequest":[{"hooks": [{"type": "command", "command": "/path/to/ccman.py hook"}]}],
+    "Stop":             [{"hooks": [{"type": "command", "command": "/path/to/ccman.py hook"}]}],
+    "Notification":     [{"hooks": [{"type": "command", "command": "/path/to/ccman.py hook"}]}],
+    "SessionEnd":       [{"hooks": [{"type": "command", "command": "/path/to/ccman.py hook"}]}]
+  }
+}
+```
+
+`ccman hook` reads the event JSON on stdin and writes `~/.config/ccman/state/<session_id>`:
+
+| Hook event | State written |
+|-----------|---------------|
+| `UserPromptSubmit`, `PreToolUse` | `busy` → `⟳` |
+| `PermissionRequest`, `Notification` (`notification_type` = permission) | `approval` → `‼` (blinks) |
+| `Stop`, `SessionStart`, other `Notification` | `waiting` → `●` (blinks) |
+| `SessionEnd` | file removed |
+
+A `waiting` session whose state file is untouched for over 5 minutes is shown as idle (`○`).
+Sessions needing your attention (`●` / `‼`) pulse between bright and dim so they stand out.
 
 ## Session Storage
 

@@ -1,6 +1,6 @@
 # ccman
 
-A terminal TUI for managing Claude Code sessions and projects.
+A simple, lightweight, zero-dependency terminal TUI for managing many Claude Code agents — every session and project in one pane.
 
 ## Demo
 
@@ -26,11 +26,22 @@ https://github.com/user-attachments/assets/56922f30-0b6b-45f8-a01f-68e7e98bd5c9
 
 ## Installation
 
+One command, straight from GitHub — no clone, no pip, no build:
+
 ```bash
-ln -s "$PWD/ccman.py" ~/.local/bin/ccman
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/kevinbin/ccman/master/ccman.py -o ~/.local/bin/ccman
+chmod +x ~/.local/bin/ccman
 ```
 
-`ccman.py` is directly executable (`#!/usr/bin/env python3`). No build step needed.
+Make sure `~/.local/bin` is on your `$PATH`. `ccman.py` is a single stdlib-only script (`#!/usr/bin/env python3`) — nothing else to install.
+
+Prefer to track updates with git? Clone and symlink instead:
+
+```bash
+git clone https://github.com/kevinbin/ccman
+ln -s "$PWD/ccman/ccman.py" ~/.local/bin/ccman
+```
 
 ## Usage
 
@@ -166,3 +177,7 @@ Sessions are read from `~/.claude/projects/`. Each project directory corresponds
 A session title is taken from its first real prompt; injected scaffolding (the local-command caveat, `<command-name>` wrappers, skill boilerplate) is skipped, so sessions started with a slash command like `/clear` still show what you actually asked. Sessions whose first message is a scheduled-task run are pulled out of the directory they ran in and regrouped under a top-level routine section by task name; each run resumes in its original working directory.
 
 Custom titles are stored in `~/.config/ccman/titles.json`.
+
+## License
+
+[MIT](LICENSE) © 2026 kevinbin

@@ -5,6 +5,7 @@ A terminal TUI for managing Claude Code sessions and projects.
 ## Features
 
 - Lists all Claude Code projects with their sessions underneath
+- Groups scheduled-task (routine) runs into their own top-level sections by name, each run tagged with its execution date
 - Recognises git worktrees as `⑂ <main-repo> · <branch>`; real paths are resolved from session history so worktree projects open correctly
 - Live per-session state (⟳ responding · ● waiting · ‼ approval · ○ idle) sourced from Claude Code hooks; sessions that need you blink
 - Detects running panes on startup — state survives ccman restarts
@@ -36,14 +37,17 @@ ccman
 ## Visual Layout
 
 ```
-──── 2 projects─7 sessions─2 open ────   ← header (live counts)
+─── Project:3--Routine:1--Session:10 ───  ← header (live counts)
  ▼ ~/workbench/myapp [main]  (3)         ← project: expanded, git branch, session count
- ⟳ Add OAuth flow                        ← running — Claude is thinking  (blue)
- ● Fix login bug                         ← running — waiting for input   (magenta)
+ ⟳ Add OAuth flow                        ← running — Claude is responding (blue)
+ ● Fix login bug                         ← running — waiting for input   (yellow)
  ✓ Marked session                        ← marked for batch open         (green)
    Untitled session
  ⑂ myapp · feature/oauth  (2)            ← git worktree of myapp (dim)
  ▶ ~/workbench/notes  (1)                ← project: collapsed
+ ▼ ◷ nightly-backup  (4)                 ← routine group: scheduled-task runs by name (blue)
+   Back up databases          06-09 02:00  ← each run tagged with its exec date
+   Back up databases          06-08 02:00
 ─────────────────────────────────────
  ?·help  q·quit                          ← key bar (or /query▌  (N) in search)
 ```
@@ -65,7 +69,7 @@ ccman
 | Key | Action |
 |-----|--------|
 | `Enter` / `o` | Open session (or switch focus if already running); opens all marked sessions if any are marked |
-| `n` | New session in current project |
+| `n` | New session in current project (not available on routine groups) |
 | `N` | New project (prompts for path, Tab autocompletes directories) |
 | `d` | Delete selected session; on a missing-path project, delete the project record |
 | `K` | Kill tmux pane of the selected running session |
@@ -104,6 +108,7 @@ ccman
 | `✓` | Session is marked for batch open (green) |
 | `⚠` | Project directory no longer exists on disk — `d` to delete the record |
 | `▼` / `▶` | Project is expanded / collapsed |
+| `◷` | Routine group — scheduled-task runs grouped by name (blue); each run shows its exec date on the right |
 | `⑂` | Git worktree — shown as `⑂ <main-repo> · <branch>` (dim) |
 
 State comes from Claude Code hooks (see below), not pane-scraping. Sessions without
@@ -153,5 +158,7 @@ Sessions needing your attention (`●` / `‼`) pulse between bright and dim so 
 ## Session Storage
 
 Sessions are read from `~/.claude/projects/`. Each project directory corresponds to a filesystem path (slashes encoded as dashes), containing `.jsonl` files — one per session.
+
+A session title is taken from its first real prompt; injected scaffolding (the local-command caveat, `<command-name>` wrappers, skill boilerplate) is skipped, so sessions started with a slash command like `/clear` still show what you actually asked. Sessions whose first message is a scheduled-task run are pulled out of the directory they ran in and regrouped under a top-level routine section by task name; each run resumes in its original working directory.
 
 Custom titles are stored in `~/.config/ccman/titles.json`.

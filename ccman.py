@@ -87,7 +87,7 @@ def save_custom_title(session_id: str, title: str):
 
 
 def _session_info(jsonl: Path, custom_titles: dict | None = None) -> dict:
-    ai_title = fallback = first_ts = None
+    ai_title = fallback = first_ts = routine_name = None
     try:
         with open(jsonl, "r", errors="ignore") as f:
             for raw in f:
@@ -103,20 +103,30 @@ def _session_info(jsonl: Path, custom_titles: dict | None = None) -> dict:
                 if d.get("type") == "ai-title":
                     ai_title = d.get("aiTitle", "")
                     break
-                if fallback is None and d.get("type") == "user":
+                if fallback is None and d.get("type") == "user" and not d.get("isMeta"):
                     c = d.get("message", {}).get("content", "")
+                    text = None
                     if isinstance(c, list):
                         for blk in c:
                             if isinstance(blk, dict) and blk.get("type") == "text":
-                                fallback = blk["text"]
+                                text = blk["text"]
                                 break
                     elif isinstance(c, str):
-                        fallback = c
+                        text = c
+                    if text and text.strip() and not text.lstrip().startswith(
+                            ("<command-name>", "<command-message>", "<local-command-")):
+                        if text.lstrip().startswith("<scheduled-task"):
+                            m = re.search(r'name="([^"]*)"', text)
+                            routine_name = m.group(1) if m else "(routine)"
+                        fallback = text
     except (IOError, OSError):
         pass
 
     sid = jsonl.stem
-    auto_title = (ai_title or fallback or "(no title)").split("\n")[0].strip()
+    if routine_name is not None:
+        auto_title = (ai_title or routine_name).split("\n")[0].strip()
+    else:
+        auto_title = (ai_title or fallback or "(no title)").split("\n")[0].strip()
     custom = (custom_titles or {}).get(sid)
     title = custom if custom else auto_title
 
@@ -138,7 +148,8 @@ def _session_info(jsonl: Path, custom_titles: dict | None = None) -> dict:
     else:
         ts = dt.strftime("%m/%d")
     return {"id": sid, "file": jsonl, "title": title, "auto_title": auto_title,
-            "custom": bool(custom), "time": ts, "mtime": mtime, "birthtime": birthtime}
+            "custom": bool(custom), "routine": routine_name,
+            "time": ts, "mtime": mtime, "birthtime": birthtime}
 
 
 def _read_cwd(jsonl: Path) -> str | None:
@@ -192,6 +203,36 @@ def load_projects() -> list:
             "expanded": True,
             "last_active": sessions[0]["mtime"] if sessions else 0,
             "path_exists": os.path.isdir(path),
+            "routine": False,
+        })
+
+    # Routine (scheduled-task) runs: pull them out of their real projects and
+    # regroup by routine name into top-level pseudo-projects shown beside projects.
+    groups: dict[str, list] = {}
+    for proj in projects:
+        kept = []
+        for s in proj["sessions"]:
+            name = s.get("routine")
+            if name:
+                s["proj_path"] = proj["path"]   # remember cwd for resume
+                groups.setdefault(name, []).append(s)
+            else:
+                kept.append(s)
+        proj["sessions"] = kept
+    for name, sess in sorted(groups.items()):
+        sess.sort(key=lambda s: s["birthtime"], reverse=True)
+        rpath = sess[0].get("proj_path", "")
+        projects.append({
+            "dir_name": f"routine:{name}",
+            "path": rpath,
+            "display": name,
+            "branch": None,
+            "worktree_main": None,
+            "sessions": sess,
+            "expanded": True,
+            "last_active": sess[0]["mtime"],
+            "path_exists": os.path.isdir(rpath),
+            "routine": True,
         })
     return projects
 
@@ -354,11 +395,12 @@ def _tmux_open(cmd: str, cwd: str | None = None) -> tuple[str | None, str | None
 
 def open_session(proj: dict, sess: dict) -> tuple[str, str | None]:
     """Returns (status_message, new_pane_id)."""
+    cwd = sess.get("proj_path") or proj["path"]
     cmd = f"{CLAUDE_BIN} -r {sess['id']}"
     if _in_tmux():
-        err, pane_id = _tmux_open(cmd, proj["path"])
+        err, pane_id = _tmux_open(cmd, cwd)
         return (f"Error: {err}" if err else f"Resumed → {sess['title'][:35]}"), pane_id
-    return f"Not in tmux. Run: cd {proj['path']!r} && {cmd}", None
+    return f"Not in tmux. Run: cd {cwd!r} && {cmd}", None
 
 
 def new_session(proj: dict) -> tuple[str, str | None]:
@@ -596,9 +638,9 @@ class App:
 
         # header — live stats
         n_sess = sum(len(p["sessions"]) for p in self.projects)
-        n_run = len(self.running_sessions)
-        open_s = f"─{n_run} open" if n_run else ""
-        self._hline(0, w, f" {len(self.projects)} projects─{n_sess} sessions{open_s} ", C_OK)
+        n_rt = sum(1 for p in self.projects if p.get("routine"))
+        n_proj = len(self.projects) - n_rt
+        self._hline(0, w, f" Project:{n_proj}--Routine:{n_rt}--Session:{n_sess} ", C_OK)
 
         # list
         ch = self._content_h()
@@ -615,17 +657,22 @@ class App:
             if kind == "project":
                 missing = not proj.get("path_exists", True)
                 wt = proj.get("worktree_main")
+                rt = proj.get("routine")
                 arrow = "⚠" if missing else ("▼" if proj["expanded"] else "▶")
                 branch = f" [{proj['branch']}]" if proj.get("branch") else ""
                 n = len(proj["sessions"])
                 if wt and not missing:
                     label = f" ⑂ {wt} · {proj['branch'] or '?'}  ({n})"
+                elif rt:
+                    label = f" {arrow} ◷ {proj['display']}  ({n})"
                 else:
                     label = f" {arrow} {proj['display']}{branch}  ({n})"
                 if sel:
                     attr = curses.color_pair(C_SEL) | curses.A_BOLD
                 elif is_match:
                     attr = curses.color_pair(C_MATCH) | curses.A_BOLD
+                elif rt:
+                    attr = curses.color_pair(C_THINK) | curses.A_BOLD
                 elif missing or wt:
                     attr = curses.color_pair(C_DIM) | curses.A_BOLD
                 else:
@@ -659,7 +706,11 @@ class App:
                 else:
                     prefix, pfx_attr = "  ", 0
 
-                label = f"{prefix}{sess['title'][:col_w - len(prefix) - 1]}"
+                date = ""
+                if sess.get("routine"):
+                    date = datetime.fromtimestamp(sess["birthtime"]).strftime("%m-%d %H:%M")
+                title_w = col_w - len(prefix) - 1 - (len(date) + 1 if date else 0)
+                label = f"{prefix}{sess['title'][:max(0, title_w)]}"
                 if sel:
                     row_attr = curses.color_pair(C_SEL)
                 elif is_match:
@@ -672,6 +723,13 @@ class App:
                 if prefix.strip():
                     try:
                         self.scr.addstr(y, 0, prefix, pfx_attr)
+                    except curses.error:
+                        pass
+                # Routine runs: show the execution date on the right
+                if date:
+                    date_attr = curses.color_pair(C_SEL) if sel else curses.color_pair(C_DIM)
+                    try:
+                        self.scr.addstr(y, col_w - len(date) - 1, date, date_attr)
                     except curses.error:
                         pass
 
@@ -957,6 +1015,8 @@ class App:
         cur = self._cur()
         if not cur:
             return "Nothing selected"
+        if cur[1].get("routine"):
+            return "Routine group — no new session"
         if not cur[1].get("path_exists", True):
             return f"Path does not exist: {cur[1]['path']}"
         msg, pane_id = new_session(cur[1])
@@ -1293,7 +1353,7 @@ class App:
             lines = [
                 ("Title",    sess["title"]),
                 ("ID",       sess["id"]),
-                ("Path",     proj["path"]),
+                ("Path",     sess.get("proj_path") or proj["path"]),
                 ("Created",  created),
                 ("Modified", modified),
                 ("Turns",    str(turns)),

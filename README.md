@@ -2,6 +2,10 @@
 
 A terminal TUI for managing Claude Code sessions and projects.
 
+## Demo
+
+https://github.com/user-attachments/assets/56922f30-0b6b-45f8-a01f-68e7e98bd5c9
+
 ## Features
 
 - Lists all Claude Code projects with their sessions underneath

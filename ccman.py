@@ -377,7 +377,6 @@ C_SEL    = 4
 C_DIM    = 5
 C_OK     = 6
 C_MARK   = 7   # green – "✓" marked-for-open indicator
-C_RUN    = 8   # magenta  – "●" running-in-pane marker
 C_MATCH  = 9   # red      – search match highlight
 C_THINK  = 10  # blue     – "⟳" thinking indicator
 C_WARN   = 11  # yellow   – "‼" awaiting-permission marker
@@ -418,7 +417,6 @@ class App:
         curses.init_pair(C_DIM,    curses.COLOR_YELLOW, bg)
         curses.init_pair(C_OK,     curses.COLOR_GREEN,  bg)
         curses.init_pair(C_MARK,   curses.COLOR_GREEN,    bg)
-        curses.init_pair(C_RUN,    curses.COLOR_MAGENTA,  bg)
         curses.init_pair(C_MATCH,  curses.COLOR_YELLOW,   bg)
         curses.init_pair(C_THINK,  curses.COLOR_BLUE,     bg)
         curses.init_pair(C_WARN,   curses.COLOR_YELLOW,   bg)
@@ -651,11 +649,11 @@ class App:
                     elif st == "approval":
                         prefix, pfx_attr = "‼ ", curses.color_pair(C_WARN) | pulse
                     elif st == "waiting" and time.time() - mt > IDLE_AFTER:
-                        prefix, pfx_attr = "○ ", curses.A_DIM
+                        prefix, pfx_attr = "○ ", curses.color_pair(C_MARK) | curses.A_BOLD
                     elif st == "waiting":
-                        prefix, pfx_attr = "● ", curses.color_pair(C_RUN) | pulse
+                        prefix, pfx_attr = "● ", curses.color_pair(C_WARN) | pulse
                     else:
-                        prefix, pfx_attr = "● ", curses.color_pair(C_RUN) | curses.A_BOLD
+                        prefix, pfx_attr = "● ", curses.color_pair(C_WARN) | curses.A_BOLD
                 elif is_marked:
                     prefix, pfx_attr = "✓ ", curses.color_pair(C_MARK) | curses.A_BOLD
                 else:
@@ -1264,9 +1262,9 @@ class App:
             "",
             "Indicators",
             "  ⟳  Claude is responding              (blue)",
-            "  ●  waiting for your input  (blinks)  (magenta)",
+            "  ●  waiting for your input  (blinks)  (yellow)",
             "  ‼  waiting for permission  (blinks)  (yellow)",
-            "  ○  idle — waiting > 5 min            (dim)",
+            "  ○  idle — waiting > 5 min            (green)",
         ])
 
     def _show_info(self):

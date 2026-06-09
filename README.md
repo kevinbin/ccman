@@ -98,9 +98,9 @@ ccman
 | Symbol | Meaning |
 |--------|---------|
 | `⟳` | Claude is responding (blue) |
-| `●` | Waiting for your input — blinks (magenta) |
+| `●` | Waiting for your input — blinks (yellow) |
 | `‼` | Waiting for tool-permission approval — blinks (yellow) |
-| `○` | Idle — waiting more than 5 minutes (dim) |
+| `○` | Idle — waiting more than 5 minutes (green) |
 | `✓` | Session is marked for batch open (green) |
 | `⚠` | Project directory no longer exists on disk — `d` to delete the record |
 | `▼` / `▶` | Project is expanded / collapsed |

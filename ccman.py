@@ -23,8 +23,7 @@ def _decode_path(dir_name: str) -> str:
     return dir_name.replace("-", "/")
 
 
-def _display_name(dir_name: str) -> str:
-    path = _decode_path(dir_name)
+def _display_name(path: str) -> str:
     home = str(Path.home())
     if path.startswith(home):
         path = "~" + path[len(home):]
@@ -32,17 +31,28 @@ def _display_name(dir_name: str) -> str:
     return ("~/" + "/".join(parts[-2:])) if len(parts) > 2 else path
 
 
-def _git_branch(path: str) -> str | None:
-    """Return current git branch for path, or None if not a git repo."""
+def _git_info(path: str) -> dict:
+    """Return {'branch': str|None, 'worktree_main': str|None} for path.
+
+    worktree_main is the main repo's basename when path is a linked worktree,
+    else None. A single git call yields both the branch and the git-dir.
+    """
     try:
         r = subprocess.run(
-            ["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+            ["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD", "--absolute-git-dir"],
             capture_output=True, text=True, timeout=1,
         )
-        branch = r.stdout.strip()
-        return branch if r.returncode == 0 and branch else None
+        if r.returncode != 0:
+            return {"branch": None, "worktree_main": None}
+        lines = r.stdout.splitlines()
+        branch = lines[0].strip() if lines else ""
+        gitdir = lines[1].strip() if len(lines) > 1 else ""
+        main = None
+        if "/.git/worktrees/" in gitdir:
+            main = os.path.basename(gitdir.split("/.git/worktrees/")[0])
+        return {"branch": branch or None, "worktree_main": main}
     except Exception:
-        return None
+        return {"branch": None, "worktree_main": None}
 
 
 def read_session_states() -> dict:
@@ -131,6 +141,30 @@ def _session_info(jsonl: Path, custom_titles: dict | None = None) -> dict:
             "custom": bool(custom), "time": ts, "mtime": mtime, "birthtime": birthtime}
 
 
+def _read_cwd(jsonl: Path) -> str | None:
+    """Return the real working directory recorded in a session's jsonl.
+
+    The project dir name encodes the path lossily (/, ., - all collapse to -),
+    so the cwd field is the only reliable source of the true path.
+    """
+    try:
+        with open(jsonl, "r", errors="ignore") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    d = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                cwd = d.get("cwd")
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except (IOError, OSError):
+        pass
+    return None
+
+
 def load_projects() -> list:
     if not CLAUDE_PROJECTS_DIR.exists():
         return []
@@ -146,12 +180,14 @@ def load_projects() -> list:
             except Exception:
                 pass
         sessions.sort(key=lambda s: s["birthtime"], reverse=True)
-        path = _decode_path(d.name)
+        path = next((c for s in sessions if (c := _read_cwd(s["file"]))), None) or _decode_path(d.name)
+        info = _git_info(path)
         projects.append({
             "dir_name": d.name,
             "path": path,
-            "display": _display_name(d.name),
-            "branch": _git_branch(path),
+            "display": _display_name(path),
+            "branch": info["branch"],
+            "worktree_main": info["worktree_main"],
             "sessions": sessions,
             "expanded": True,
             "last_active": sessions[0]["mtime"] if sessions else 0,
@@ -166,7 +202,16 @@ def _in_tmux() -> bool:
 
 
 def _tmux_my_pane_id() -> str:
-    """Return the tmux pane ID of the current process."""
+    """Return the tmux pane ID of the ccman process itself.
+
+    $TMUX_PANE is set by tmux in each pane's environment and names the pane
+    this process runs in. We must NOT rely on `display-message -p '#{pane_id}'`,
+    which returns the *active* pane — wrong whenever focus is on another pane
+    (e.g. a session pane), which would resize the wrong pane.
+    """
+    pane = os.environ.get("TMUX_PANE", "")
+    if pane:
+        return pane
     r = subprocess.run(["tmux", "display-message", "-p", "#{pane_id}"],
                        capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else ""
@@ -348,6 +393,7 @@ class App:
         self.session_states: dict[str, tuple[str, float]] = {}  # session_id → (state, mtime)
         self._pending_panes: dict[str, tuple[str, float]] = {}  # pane_id → (proj_dir_name, created_at)
         self.marked: set[str] = set()                # session IDs marked for batch open
+        self._prev_other = 0                          # 非 ccman pane 数；会话关闭后据此把自己缩回 20%
         self.sel: int = 0
         self.offset: int = 0
         self.status: str = ""
@@ -468,6 +514,26 @@ class App:
             self.running_sessions.pop(sid, None)
         if dead:
             self._rebuild_all()
+        # 会话 pane 关闭后，tmux 会把空间塞给 ccman；缩回 20% 维持 sidebar 宽度
+        other = count_session_panes()
+        if 0 < other < self._prev_other:
+            self._keep_width()
+        self._prev_other = other
+
+    def _keep_width(self):
+        """Re-shrink ccman to 20% after a session pane closed, so it doesn't
+        expand into the freed space. No-op when ccman is the sole pane."""
+        my_id = _tmux_my_pane_id()
+        if not my_id:
+            return
+        r = subprocess.run(["tmux", "display-message", "-p", "#{window_width} #{window_height}"],
+                           capture_output=True, text=True)
+        try:
+            ww, wh = map(int, r.stdout.split())
+        except ValueError:
+            return
+        flag = "-x" if ww >= wh * 2 else "-y"
+        subprocess.run(["tmux", "resize-pane", "-t", my_id, flag, "20%"], capture_output=True)
 
     def _rebuild_all(self):
         self.all_flat = []
@@ -550,20 +616,25 @@ class App:
 
             if kind == "project":
                 missing = not proj.get("path_exists", True)
+                wt = proj.get("worktree_main")
                 arrow = "⚠" if missing else ("▼" if proj["expanded"] else "▶")
                 branch = f" [{proj['branch']}]" if proj.get("branch") else ""
-                label = f" {arrow} {proj['display']}{branch}  ({len(proj['sessions'])})"
+                n = len(proj["sessions"])
+                if wt and not missing:
+                    label = f" ⑂ {wt} · {proj['branch'] or '?'}  ({n})"
+                else:
+                    label = f" {arrow} {proj['display']}{branch}  ({n})"
                 if sel:
                     attr = curses.color_pair(C_SEL) | curses.A_BOLD
                 elif is_match:
                     attr = curses.color_pair(C_MATCH) | curses.A_BOLD
-                elif missing:
+                elif missing or wt:
                     attr = curses.color_pair(C_DIM) | curses.A_BOLD
                 else:
                     attr = curses.color_pair(C_PROJ) | curses.A_BOLD
                 self._row(y, col_w, label, attr)
                 # draw branch in a different colour when not selected
-                if not sel and not missing and not match_set and branch and proj.get("branch"):
+                if not sel and not missing and not wt and not match_set and branch and proj.get("branch"):
                     bx = 3 + len(proj["display"]) + 1   # " ▼ <display>" + space
                     try:
                         self.scr.addstr(y, bx, branch, curses.color_pair(C_DIM) | curses.A_BOLD)

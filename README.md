@@ -5,6 +5,7 @@ A terminal TUI for managing Claude Code sessions and projects.
 ## Features
 
 - Lists all Claude Code projects with their sessions underneath
+- Recognises git worktrees as `⑂ <main-repo> · <branch>`; real paths are resolved from session history so worktree projects open correctly
 - Live per-session state (⟳ responding · ● waiting · ‼ approval · ○ idle) sourced from Claude Code hooks; sessions that need you blink
 - Detects running panes on startup — state survives ccman restarts
 - Batch open: mark multiple sessions with Space, then open all at once
@@ -41,6 +42,7 @@ ccman
  ● Fix login bug                         ← running — waiting for input   (magenta)
  ✓ Marked session                        ← marked for batch open         (green)
    Untitled session
+ ⑂ myapp · feature/oauth  (2)            ← git worktree of myapp (dim)
  ▶ ~/workbench/notes  (1)                ← project: collapsed
 ─────────────────────────────────────
  ?·help  q·quit                          ← key bar (or /query▌  (N) in search)
@@ -102,6 +104,7 @@ ccman
 | `✓` | Session is marked for batch open (green) |
 | `⚠` | Project directory no longer exists on disk — `d` to delete the record |
 | `▼` / `▶` | Project is expanded / collapsed |
+| `⑂` | Git worktree — shown as `⑂ <main-repo> · <branch>` (dim) |
 
 State comes from Claude Code hooks (see below), not pane-scraping. Sessions without
 hooks configured still appear — shown as `●` while running.

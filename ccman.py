@@ -229,7 +229,7 @@ def load_projects() -> list:
             "branch": None,
             "worktree_main": None,
             "sessions": sess,
-            "expanded": True,
+            "expanded": False,
             "last_active": sess[0]["mtime"],
             "path_exists": os.path.isdir(rpath),
             "routine": True,
@@ -475,7 +475,11 @@ class App:
 
     def reload(self):
         sel_id = self._cur_id()
+        expanded = {p["dir_name"]: p["expanded"] for p in self.projects}
         self.projects = load_projects()
+        for p in self.projects:
+            if p["dir_name"] in expanded:
+                p["expanded"] = expanded[p["dir_name"]]
         detected = get_running_sessions()
         # Read session IDs stored in tmux pane options (survives ccman restart)
         r_opt = subprocess.run(
@@ -886,6 +890,8 @@ class App:
                 self._show_info()
             elif key == ord("?"):
                 self._show_help()
+            elif key == ord("c"):
+                self._clear_session()
             elif key == ord("K"):
                 self._kill_pane()
             elif key == ord("Q"):
@@ -1142,11 +1148,12 @@ class App:
 
         if cur[0] == "project":
             proj = cur[1]
-            if proj.get("path_exists", True):
-                self.status = "Select a session to delete"
+            if proj.get("routine"):
+                self.status = "Routine groups can't be deleted (delete runs individually)"
                 return
+            n = len(proj["sessions"])
             h, w = self.scr.getmaxyx()
-            msg = f" Delete project record '{proj['display']}'? [y/N] "
+            msg = f" Delete project record '{proj['display']}' ({n} session{'s' if n != 1 else ''}, dir on disk kept)? [y/N] "
             try:
                 self.scr.addstr(h - 1, 0, (msg + " " * w)[:w - 1], curses.color_pair(C_SEL))
             except curses.error:
@@ -1156,9 +1163,25 @@ class App:
             ch = self.scr.getch()
             self.scr.timeout(200)
             if ch == ord("y"):
+                proj_dir = CLAUDE_PROJECTS_DIR / proj["dir_name"]
+                # kill panes first so live processes can't rewrite files after
+                # rmtree; match by jsonl location to include routine runs whose
+                # files live in this dir but were regrouped under pseudo-projects
+                killed = False
+                for p in self.projects:
+                    for s in p["sessions"]:
+                        if s["file"].parent != proj_dir:
+                            continue
+                        pane_id = self.running_sessions.pop(s["id"], None)
+                        if pane_id:
+                            subprocess.run(["tmux", "kill-pane", "-t", pane_id],
+                                           capture_output=True)
+                            killed = True
+                if killed:
+                    time.sleep(0.2)  # give processes a moment to die before rmtree
                 try:
-                    shutil.rmtree(CLAUDE_PROJECTS_DIR / proj["dir_name"])
-                    self.status = "Project record deleted"
+                    shutil.rmtree(proj_dir)
+                    self.status = "Project record deleted (dir on disk kept)"
                 except OSError as e:
                     self.status = f"Delete failed: {e}"
                 self.reload()
@@ -1168,7 +1191,8 @@ class App:
 
         sess = cur[2]
         h, w = self.scr.getmaxyx()
-        msg = f" Delete '{sess['title'][:35]}'? [y/N] "
+        running_hint = " (kills pane)" if sess["id"] in self.running_sessions else ""
+        msg = f" Delete '{sess['title'][:35]}'?{running_hint} [y/N] "
         try:
             self.scr.addstr(h - 1, 0, (msg + " " * w)[:w - 1], curses.color_pair(C_SEL))
         except curses.error:
@@ -1178,12 +1202,51 @@ class App:
         ch = self.scr.getch()
         self.scr.timeout(200)
         if ch == ord("y"):
+            # kill the pane first so the live process can't rewrite the jsonl
+            pane_id = self.running_sessions.pop(sess["id"], None)
+            if pane_id:
+                subprocess.run(["tmux", "kill-pane", "-t", pane_id], capture_output=True)
+                time.sleep(0.2)  # give the process a moment to die before unlink
             try:
                 sess["file"].unlink()
-                self.status = "Session deleted"
+                self.status = "Session deleted" + (", pane killed" if pane_id else "")
             except OSError as e:
                 self.status = f"Delete failed: {e}"
             self.reload()
+        else:
+            self.status = "Cancelled"
+
+    def _clear_session(self):
+        cur = self._cur()
+        if not cur or cur[0] != "session":
+            self.status = "Select a running session to clear"
+            return
+        sess = cur[2]
+        pane_id = self.running_sessions.get(sess["id"])
+        if not pane_id:
+            self.status = "Session is not running in a pane"
+            return
+        h, w = self.scr.getmaxyx()
+        msg = f" Send /clear? '{sess['title'][:35]}'"
+        try:
+            self.scr.addstr(h - 1, 0, (msg + " " * w)[:w - 1], curses.color_pair(C_SEL))
+        except curses.error:
+            pass
+        self.scr.refresh()
+        self.scr.timeout(-1)
+        ch = self.scr.getch()
+        self.scr.timeout(200)
+        if ch in (ord("y"), ord("Y"), curses.KEY_ENTER, 10, 13):
+            ret = subprocess.run(["tmux", "send-keys", "-t", pane_id, "-l", "/clear"],
+                                 capture_output=True)
+            if ret.returncode == 0:
+                time.sleep(0.2)  # let the TUI register the slash command before Enter
+                subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"],
+                               capture_output=True)
+                self.status = f"Sent /clear to {pane_id}"
+            else:
+                self.running_sessions.pop(sess["id"], None)
+                self.status = f"send-keys failed: {ret.stderr.decode().strip()}"
         else:
             self.status = "Cancelled"
 
@@ -1303,7 +1366,8 @@ class App:
             "  Enter / o    open or resume session",
             "  n            new session",
             "  N            new project  (Esc cancels)",
-            "  d            delete session  (or ghost project)",
+            "  d            delete session / project record  (dir on disk kept)",
+            "  c            send /clear to running session  (Enter/y confirms)",
             "  K            kill tmux pane  (Enter/y confirms)",
             "  Q            kill all running sessions  (y confirms)",
             "  e            rename session  (Esc cancels)",
@@ -1394,7 +1458,8 @@ Actions:
   Enter / o    open or resume session
   n            new session in current project
   N            new project (prompts for path)
-  d            delete session  (or ghost project if path missing)
+  d            delete session / project record  (actual dir on disk is kept)
+  c            send /clear to running session  (Enter/y confirms)
   K            kill tmux pane of running session  (Enter/y confirms)
   e            rename session (custom title)
   i            show full info popup

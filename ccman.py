@@ -128,8 +128,9 @@ def _session_info(jsonl: Path, custom_titles: dict | None = None) -> dict:
         auto_title = (ai_title or routine_name).split("\n")[0].strip()
     else:
         auto_title = (ai_title or fallback or "(no title)").split("\n")[0].strip()
+    claude_title = _read_custom_title(jsonl)   # /rename → matches desktop
     custom = (custom_titles or {}).get(sid)
-    title = custom if custom else auto_title
+    title = custom or claude_title or auto_title
 
     st = jsonl.stat()
     mtime = st.st_mtime
@@ -151,6 +152,35 @@ def _session_info(jsonl: Path, custom_titles: dict | None = None) -> dict:
     return {"id": sid, "file": jsonl, "title": title, "auto_title": auto_title,
             "custom": bool(custom), "routine": routine_name,
             "time": ts, "mtime": mtime, "birthtime": birthtime}
+
+
+def _read_custom_title(jsonl: Path) -> str | None:
+    """Return the latest `/rename` title (the name Claude Code/desktop shows).
+
+    `/rename` appends a `custom-title` record near the end of the session, so a
+    bounded tail read finds the most recent one without parsing multi-MB files
+    on every refresh.
+    """
+    try:
+        size = jsonl.stat().st_size
+        with open(jsonl, "rb") as f:
+            if size > 65536:
+                f.seek(size - 65536)
+                f.readline()   # drop the partial first line
+            tail = f.read().decode("utf-8", "ignore")
+    except OSError:
+        return None
+    title = None
+    for raw in tail.splitlines():
+        if '"custom-title"' not in raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") == "custom-title" and d.get("customTitle"):
+            title = d["customTitle"]   # keep overwriting → last one wins
+    return title
 
 
 def _read_cwd(jsonl: Path) -> str | None:
@@ -1421,16 +1451,38 @@ class App:
         new_title = self._readline(" New title: ")
         if new_title is None:
             self.status = "Cancelled"
-        elif new_title:
-            try:
-                save_custom_title(sess["id"], new_title)
-                sess["title"] = new_title
-                sess["custom"] = True
-                self.status = f"Renamed → {new_title[:40]}"
-            except Exception as e:
-                self.status = f"Error: {e}"
-        else:
+            return
+        if not new_title:
             self.status = "Cancelled (empty input)"
+            return
+
+        pane_id = self.running_sessions.get(sess["id"])
+        if pane_id:
+            # Running → drive Claude's own /rename so desktop, the /resume
+            # picker and ccman all agree (ccman reads it back via custom-title).
+            ret = subprocess.run(
+                ["tmux", "send-keys", "-t", pane_id, "-l", f"/rename {new_title}"],
+                capture_output=True)
+            if ret.returncode != 0:
+                self.running_sessions.pop(sess["id"], None)
+                self.status = f"send-keys failed: {ret.stderr.decode().strip()}"
+                return
+            time.sleep(0.2)  # let the TUI register the slash command before Enter
+            subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True)
+            save_custom_title(sess["id"], "")   # drop any stale local override
+            sess["title"] = new_title
+            sess["custom"] = False
+            self.status = f"/rename → {new_title[:40]}"
+            return
+
+        # Not running → ccman-local override only (Claude can't be reached).
+        try:
+            save_custom_title(sess["id"], new_title)
+            sess["title"] = new_title
+            sess["custom"] = True
+            self.status = f"Renamed (local) → {new_title[:40]}"
+        except Exception as e:
+            self.status = f"Error: {e}"
 
     def _show_popup(self, rows: list[str]):
         """Render a centered box with rows, wait for any key."""
@@ -1476,7 +1528,7 @@ class App:
             "  c            send /clear to running session  (Enter/y confirms)",
             "  K            kill tmux pane  (Enter/y confirms)",
             "  Q            kill all running sessions  (y confirms)",
-            "  e            rename session  (Esc cancels)",
+            "  e            rename session — running→/rename, else local  (Esc cancels)",
             "  i            session info",
             "",
             "Search  (/)",
@@ -1569,7 +1621,7 @@ Actions:
   d            delete session / project record  (actual dir on disk is kept)
   c            send /clear to running session  (Enter/y confirms)
   K            kill tmux pane of running session  (Enter/y confirms)
-  e            rename session (custom title)
+  e            rename session (running → Claude /rename; else ccman-local title)
   i            show full info popup
   q            quit
   ?            in-app help

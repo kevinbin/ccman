@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import time
@@ -11,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-CLAUDE_BIN = "claude --allow-dangerously-skip-permissions"
+CLAUDE_BIN = "claude --remote-control --allow-dangerously-skip-permissions"
 CCMAN_CONFIG_DIR = Path.home() / ".config" / "ccman"
 TITLES_FILE = CCMAN_CONFIG_DIR / "titles.json"
 STATE_DIR = CCMAN_CONFIG_DIR / "state"   # hook 写入的会话状态: <session_id> → "busy"|"waiting"
@@ -409,6 +410,46 @@ def new_session(proj: dict) -> tuple[str, str | None]:
         err, pane_id = _tmux_open(CLAUDE_BIN, proj["path"])
         return (f"Error: {err}" if err else f"New session → {proj['display']}"), pane_id
     return f"Not in tmux. Run: cd {proj['path']!r} && {CLAUDE_BIN}", None
+
+# ─── worktree ─────────────────────────────────────────────────────────────────
+
+_WT_SEG = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def valid_worktree_name(name: str) -> bool:
+    """Mirror EnterWorktree's rule: /-separated segments of [A-Za-z0-9._-], ≤64."""
+    return bool(name) and len(name) <= 64 and all(
+        _WT_SEG.match(seg) for seg in name.split("/"))
+
+
+def _default_base_ref(repo: str) -> str:
+    """Fresh base for a new worktree: origin's default branch, else local HEAD."""
+    r = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "origin/HEAD"],
+        capture_output=True, text=True,
+    )
+    ref = r.stdout.strip()
+    if r.returncode == 0 and ref and ref != "origin/HEAD":
+        return ref
+    return "HEAD"
+
+
+def create_worktree(repo: str, name: str) -> tuple[str | None, str | None]:
+    """Add a worktree at <repo>/.claude/worktrees/<name> on a new branch <name>.
+
+    Branches off origin's default branch (fresh) so it starts from the latest
+    remote tip; falls back to local HEAD when there is no remote.
+    Returns (error, worktree_path); error is None on success.
+    """
+    wt_path = os.path.join(repo, ".claude", "worktrees", name)
+    base = _default_base_ref(repo)
+    r = subprocess.run(
+        ["git", "-C", repo, "worktree", "add", "-b", name, wt_path, base],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return (r.stderr.strip() or "git worktree add failed"), None
+    return None, wt_path
 
 # ─── UI ───────────────────────────────────────────────────────────────────────
 
@@ -878,6 +919,10 @@ class App:
                 self.status = self._do_new_session()
             elif key == ord("N"):
                 self._prompt_project()
+            elif key == ord("w"):
+                self._make_worktree()
+            elif key == ord("t"):
+                self._open_lazygit()
             elif key == ord("d"):
                 self._delete_cur()
             elif key == ord("/"):
@@ -1034,6 +1079,65 @@ class App:
         panes = count_session_panes()
         pane_s = f" · {panes} pane{'s' if panes != 1 else ''}" if panes else ""
         return f"{msg}{pane_s}"
+
+    def _make_worktree(self):
+        cur = self._cur()
+        if not cur:
+            self.status = "Nothing selected"
+            return
+        proj = cur[1]
+        if proj.get("routine"):
+            self.status = "Routine group — no worktree"
+            return
+        repo = proj["path"]
+        if not os.path.isdir(repo):
+            self.status = f"Path does not exist: {repo}"
+            return
+        if proj.get("branch") is None:
+            self.status = "Not a git repository"
+            return
+        name = self._readline(" Worktree name (blank=random): ")
+        if name is None:
+            self.status = "Cancelled"
+            return
+        if not name:
+            name = "wt-" + secrets.token_hex(3)
+        elif not valid_worktree_name(name):
+            self.status = "Invalid name (letters/digits/._-, /-separated, ≤64)"
+            return
+        err, wt_path = create_worktree(repo, name)
+        if err:
+            self.status = f"Worktree failed: {err}"
+            return
+        msg, pane_id = new_session({"path": wt_path, "display": os.path.basename(wt_path)})
+        if pane_id:
+            self._pending_panes[pane_id] = (wt_path.replace("/", "-"), time.time())
+            if _in_tmux():
+                time.sleep(0.05)
+                subprocess.run(["tmux", "select-pane", "-t", pane_id], capture_output=True)
+        self.status = f"Worktree '{name}' ready · {msg}"
+        self.reload()
+
+    def _open_lazygit(self):
+        cur = self._cur()
+        if not cur:
+            self.status = "Nothing selected"
+            return
+        path = cur[1]["path"]
+        if not os.path.isdir(path):
+            self.status = f"Path does not exist: {path}"
+            return
+        if not _in_tmux():
+            self.status = f"Not in tmux. Run: cd {path!r} && lazygit"
+            return
+        err, pane_id = _tmux_open("lazygit", path)
+        if err:
+            self.status = f"Error: {err}"
+            return
+        if pane_id:
+            time.sleep(0.05)
+            subprocess.run(["tmux", "select-pane", "-t", pane_id], capture_output=True)
+        self.status = f"lazygit → {cur[1]['display']}"
 
     def _readline(self, prompt: str, complete_dirs: bool = False) -> str | None:
         """Read a line from the bottom bar. Returns None if ESC was pressed."""
@@ -1366,6 +1470,8 @@ class App:
             "  Enter / o    open or resume session",
             "  n            new session",
             "  N            new project  (Esc cancels)",
+            "  w            new worktree + session  (.claude/worktrees/<name>)",
+            "  t            open lazygit in a pane",
             "  d            delete session / project record  (dir on disk kept)",
             "  c            send /clear to running session  (Enter/y confirms)",
             "  K            kill tmux pane  (Enter/y confirms)",
@@ -1458,6 +1564,8 @@ Actions:
   Enter / o    open or resume session
   n            new session in current project
   N            new project (prompts for path)
+  w            new git worktree + session  (.claude/worktrees/<name>, blank=random)
+  t            open lazygit in a tmux pane for the current project
   d            delete session / project record  (actual dir on disk is kept)
   c            send /clear to running session  (Enter/y confirms)
   K            kill tmux pane of running session  (Enter/y confirms)

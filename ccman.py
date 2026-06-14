@@ -87,6 +87,32 @@ def save_custom_title(session_id: str, title: str):
     TITLES_FILE.write_text(json.dumps(titles, indent=2, ensure_ascii=False))
 
 
+def append_rename_records(jsonl: Path, sid: str, name: str):
+    """Append the same pair of records `/rename` writes — a `custom-title` (used
+    by the /resume picker) and an `agent-name` (the in-session/desktop display
+    name) — so a session that isn't running is renamed canonically without
+    opening a pane. Byte-for-byte the format Claude Code emits.
+    """
+    recs = (
+        {"type": "custom-title", "customTitle": name, "sessionId": sid},
+        {"type": "agent-name", "agentName": name, "sessionId": sid},
+    )
+    payload = "".join(
+        json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n" for r in recs)
+    prefix = ""
+    try:
+        with open(jsonl, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell() > 0:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    prefix = "\n"   # session file didn't end on a line boundary
+    except OSError:
+        pass
+    with open(jsonl, "a", encoding="utf-8") as f:
+        f.write(prefix + payload)
+
+
 def _session_info(jsonl: Path, custom_titles: dict | None = None) -> dict:
     ai_title = fallback = first_ts = routine_name = None
     try:
@@ -1475,14 +1501,17 @@ class App:
             self.status = f"/rename → {new_title[:40]}"
             return
 
-        # Not running → ccman-local override only (Claude can't be reached).
+        # Not running → write the same custom-title record /rename would, so the
+        # name is canonical (shown by Claude's /resume picker) without a pane.
         try:
-            save_custom_title(sess["id"], new_title)
-            sess["title"] = new_title
-            sess["custom"] = True
-            self.status = f"Renamed (local) → {new_title[:40]}"
-        except Exception as e:
-            self.status = f"Error: {e}"
+            append_rename_records(sess["file"], sess["id"], new_title)
+        except OSError as e:
+            self.status = f"Rename failed: {e}"
+            return
+        save_custom_title(sess["id"], "")   # drop any stale local override
+        sess["title"] = new_title
+        sess["custom"] = False
+        self.status = f"Renamed → {new_title[:40]}"
 
     def _show_popup(self, rows: list[str]):
         """Render a centered box with rows, wait for any key."""
@@ -1528,7 +1557,7 @@ class App:
             "  c            send /clear to running session  (Enter/y confirms)",
             "  K            kill tmux pane  (Enter/y confirms)",
             "  Q            kill all running sessions  (y confirms)",
-            "  e            rename session — running→/rename, else local  (Esc cancels)",
+            "  e            rename session — syncs Claude Code's name  (Esc cancels)",
             "  i            session info",
             "",
             "Search  (/)",
@@ -1621,7 +1650,8 @@ Actions:
   d            delete session / project record  (actual dir on disk is kept)
   c            send /clear to running session  (Enter/y confirms)
   K            kill tmux pane of running session  (Enter/y confirms)
-  e            rename session (running → Claude /rename; else ccman-local title)
+  e            rename session — syncs Claude Code's name (running via /rename,
+               else writes the custom-title + agent-name records directly)
   i            show full info popup
   q            quit
   ?            in-app help
